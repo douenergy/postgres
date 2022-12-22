@@ -1351,6 +1351,7 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt)
 											EXPR_KIND_GROUP_BY,
 											false /* allow SQL92 rules */ );
 	qry->groupDistinct = stmt->groupDistinct;
+	qry->groupAll = stmt->groupAll;
 
 	if (stmt->distinctClause == NIL)
 	{
