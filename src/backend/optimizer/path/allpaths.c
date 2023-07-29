@@ -2392,13 +2392,40 @@ find_window_run_conditions(Query *subquery, AttrNumber attno,
 		wclause->runCondition = lappend(wclause->runCondition, newexpr);
 
 		/* record that this attno was used in a run condition */
-		*run_cond_attrs = bms_add_member(*run_cond_attrs,
-										 attno - FirstLowInvalidHeapAttributeNumber);
+		if (run_cond_attrs)
+			*run_cond_attrs = bms_add_member(*run_cond_attrs,
+											 attno - FirstLowInvalidHeapAttributeNumber);
 		return true;
 	}
 
 	/* unsupported OpExpr */
 	return false;
+}
+
+static bool
+clause_compatible_with_runcondition(OpExpr *opexpr)
+{
+
+	/* We're only able to use OpExprs with 2 operands */
+	if (!IsA(opexpr, OpExpr))
+		return false;
+
+	if (list_length(opexpr->args) != 2)
+		return false;
+
+	/*
+	 * Currently, we restrict this optimization to strict OpExprs.  The reason
+	 * for this is that during execution, once the runcondition becomes false,
+	 * we stop evaluating WindowFuncs.  To avoid leaving around stale window
+	 * function result values, we set them to NULL.  Having only strict
+	 * OpExprs here ensures that we properly filter out the tuples with NULLs
+	 * in the top-level WindowAgg.
+	 */
+	set_opfuncid(opexpr);
+	if (!func_strict(opexpr->opfuncid))
+		return false;
+
+	return true;
 }
 
 /*
@@ -2424,23 +2451,7 @@ check_and_push_window_quals(Query *subquery, Node *clause,
 	Var		   *var1;
 	Var		   *var2;
 
-	/* We're only able to use OpExprs with 2 operands */
-	if (!IsA(opexpr, OpExpr))
-		return true;
-
-	if (list_length(opexpr->args) != 2)
-		return true;
-
-	/*
-	 * Currently, we restrict this optimization to strict OpExprs.  The reason
-	 * for this is that during execution, once the runcondition becomes false,
-	 * we stop evaluating WindowFuncs.  To avoid leaving around stale window
-	 * function result values, we set them to NULL.  Having only strict
-	 * OpExprs here ensures that we properly filter out the tuples with NULLs
-	 * in the top-level WindowAgg.
-	 */
-	set_opfuncid(opexpr);
-	if (!func_strict(opexpr->opfuncid))
+	if (!clause_compatible_with_runcondition(opexpr))
 		return true;
 
 	/*
@@ -2474,6 +2485,40 @@ check_and_push_window_quals(Query *subquery, Node *clause,
 									   run_cond_attrs))
 			return keep_original;
 	}
+
+	return true;
+}
+
+bool
+keep_window_clause(Query *query, Node *clause)
+{
+	OpExpr	   *opexpr = (OpExpr *) clause;
+	bool		keep_original = true;
+	WindowFunc *wfunc1;
+	WindowFunc *wfunc2;
+
+	if (!clause_compatible_with_runcondition(opexpr))
+		return true;
+
+	/*
+	 * Check for plain Vars that reference window functions in the subquery.
+	 * If we find any, we'll ask find_window_run_conditions() if 'opexpr' can
+	 * be used as part of the run condition.
+	 */
+
+	/* Check the left side of the OpExpr */
+	wfunc1 = linitial(opexpr->args);
+	if (find_window_run_conditions(query, InvalidAttrNumber, wfunc1,
+								   opexpr, true, &keep_original,
+								   NULL))
+		return keep_original;
+
+	/* and check the right side */
+	wfunc2 = lsecond(opexpr->args);
+	if (find_window_run_conditions(query, InvalidAttrNumber, wfunc2,
+								   opexpr, false, &keep_original,
+								   NULL))
+		return keep_original;
 
 	return true;
 }
