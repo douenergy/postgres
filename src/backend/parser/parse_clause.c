@@ -2959,6 +2959,36 @@ transformWindowDefinitions(ParseState *pstate,
 	return result;
 }
 
+/* Parser pre_columnref_hook for QUALIFY column parsing */
+static Node *
+replace_qualify_column_ref(ParseState *pstate, ColumnRef *cref, Node *var)
+{
+	/* We're only interested in ColumnRef that didn't match anything. */
+	if (var)
+		return NULL;
+
+	if (list_length(cref->fields) == 1)
+	{
+		List	   *tlist = (List *) pstate->p_ref_hook_state;
+		ListCell   *lc;
+		Node	   *field1 = (Node *) linitial(cref->fields);
+		char	   *colname = strVal(field1);
+
+		foreach(lc, tlist)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+			if (!tle->resname)
+				continue;
+
+			if (strcmp(tle->resname, colname) == 0)
+				return (Node *) tle->expr;
+		}
+	}
+
+	return NULL;
+}
+
 /*
  * transformQualifyClause -
  *		transform QUALIFY clause
@@ -2972,8 +3002,14 @@ transformQualifyClause(ParseState *pstate, List **targetlist, Node *expr)
 	if (!expr)
 		return NIL;
 
+	pstate->p_post_columnref_hook = replace_qualify_column_ref;
+	pstate->p_ref_hook_state = (void *) *targetlist;
+
 	tle = findTargetlistEntrySQL99(pstate, expr, targetlist,
 								   EXPR_KIND_QUALIFY);
+
+	pstate->p_post_columnref_hook = NULL;
+	pstate->p_ref_hook_state = NULL;
 
 	return make_ands_implicit(tle->expr);
 }
